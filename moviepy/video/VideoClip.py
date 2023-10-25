@@ -13,7 +13,7 @@ from numbers import Real
 import numpy as np
 import proglog
 from imageio import imread, imsave
-from PIL import Image
+from PIL import Image, ImageChops
 
 from moviepy.Clip import Clip
 from moviepy.config import IMAGEMAGICK_BINARY
@@ -99,6 +99,8 @@ class VideoClip(Clip):
     ):
         super().__init__()
         self.mask = None
+        self.opacity = 1.0
+        self.mode = "normal"
         self.audio = None
         self.pos = lambda t: (0, 0)
         self.relative_pos = False
@@ -186,7 +188,7 @@ class VideoClip(Clip):
         """
         im = self.get_frame(t)
         if with_mask and self.mask is not None:
-            mask = 255 * self.mask.get_frame(t)
+            mask = 255 * self.opacity * self.mask.get_frame(t)
             im = np.dstack([im, mask]).astype("uint8")
         else:
             im = im.astype("uint8")
@@ -639,36 +641,11 @@ class VideoClip(Clip):
         on the given `picture`, the position of the clip being given
         by the clip's ``pos`` attribute. Meant for compositing.
         """
-        wf, hf = picture.size
 
         ct = t - self.start  # clip time
+        wf, hf = picture.size
+        wi, hi = self.size
 
-        # GET IMAGE AND MASK IF ANY
-        img = self.get_frame(ct).astype("uint8")
-        im_img = Image.fromarray(img)
-
-        if self.mask is not None:
-            mask = (self.mask.get_frame(ct) * 255).astype("uint8")
-            im_mask = Image.fromarray(mask).convert("L")
-
-            if im_img.size != im_mask.size:
-                bg_size = (
-                    max(im_img.size[0], im_mask.size[0]),
-                    max(im_img.size[1], im_mask.size[1]),
-                )
-
-                im_img_bg = Image.new("RGB", bg_size, "black")
-                im_img_bg.paste(im_img, (0, 0))
-
-                im_mask_bg = Image.new("L", bg_size, 0)
-                im_mask_bg.paste(im_mask, (0, 0))
-
-                im_img, im_mask = im_img_bg, im_mask_bg
-
-        else:
-            im_mask = None
-
-        wi, hi = im_img.size
         # SET POSITION
         pos = self.pos(ct)
 
@@ -681,8 +658,8 @@ class VideoClip(Clip):
                 "top": ["center", "top"],
                 "bottom": ["center", "bottom"],
             }[pos]
-        else:
-            pos = list(pos)
+        #else:
+        #    pos = list(pos)
 
         # is the position relative (given in % of the clip's size) ?
         if self.relative_pos:
@@ -698,10 +675,46 @@ class VideoClip(Clip):
             D = {"top": 0, "center": (hf - hi) / 2, "bottom": hf - hi}
             pos[1] = D[pos[1]]
 
-        pos = map(int, pos)
-        return blit(im_img, picture, pos, mask=im_mask)
+        pos = tuple(map(int, pos))
 
-    def add_mask(self):
+        # GET IMAGE AND MASK IF ANY
+        img = self.get_frame(ct).astype("uint8")
+        im_img = Image.fromarray(img)
+
+        if self.mask is not None:
+            mask = (self.mask.get_frame(ct) * 255 * self.opacity).astype("uint8")
+            im_mask = Image.fromarray(mask).convert("L")
+
+            if im_img.size != im_mask.size:
+                bg_size = (
+                    max(im_img.size[0], im_mask.size[0]),
+                    max(im_img.size[1], im_mask.size[1]),
+                )
+                im_img_bg = Image.new("RGB", bg_size, "black")
+                im_img_bg.paste(im_img, (0, 0))
+                im_mask_bg = Image.new("L", bg_size, 0)
+                im_mask_bg.paste(im_mask, (0, 0))
+                im_img, im_mask = im_img_bg, im_mask_bg
+        else:
+            if picture.size == im_img.size and pos==(0, 0) and self.mode=="normal":
+                return im_img
+            im_mask = None
+
+        # Blend Channel Mode
+        if self.mode not in ["normal"]:
+            if picture.size != im_img.size:
+                im_pic_bg = picture.crop((pos[0], pos[1], pos[0]+wi, pos[1]+hi))
+            else:
+                im_pic_bg = picture
+            modeFct = getattr(ImageChops, self.mode)
+            if self.mode in ["add", "substract"]:
+                im_img = modeFct(im_pic_bg, im_img, scale=self.mode_scale, offset=self.mode_offset)
+            else:
+                im_img = modeFct(im_pic_bg, im_img)
+        picture.paste(im_img, pos, im_mask)
+        return picture
+
+    def add_mask(self, opacity=1.0):
         """Add a mask VideoClip to the VideoClip.
 
         Returns a copy of the clip with a completely opaque mask
@@ -712,12 +725,12 @@ class VideoClip(Clip):
         image size.
         """
         if self.has_constant_size:
-            mask = ColorClip(self.size, 1.0, is_mask=True)
+            mask = ColorClip(self.size, opacity, is_mask=True)
             return self.with_mask(mask.with_duration(self.duration))
         else:
 
             def make_frame(t):
-                return np.ones(self.get_frame(t).shape[:2], dtype=float)
+                return opacity*np.ones(self.get_frame(t).shape[:2], dtype=float)
 
             mask = VideoClip(is_mask=True, make_frame=make_frame)
             return self.with_mask(mask.with_duration(self.duration))
@@ -812,7 +825,11 @@ class VideoClip(Clip):
         Returns a semi-transparent copy of the clip where the mask is
         multiplied by ``op`` (any float, normally between 0 and 1).
         """
-        self.mask = self.mask.image_transform(lambda pic: opacity * pic)
+        if opacity>=0 and opacity<=1:
+            self.opacity = opacity
+        else:
+            raise ValueError("Opacity must be a float, normally between 0 and 1")
+        #self.mask = self.mask.image_transform(lambda pic: opacity * pic)
 
     @apply_to_mask
     @outplace
@@ -855,6 +872,35 @@ class VideoClip(Clip):
         Note: Only has effect when the clip is used in a CompositeVideoClip.
         """
         self.layer = layer
+
+    @outplace
+    def with_mode(self, mode, scale=1.0, offset=0):
+        """Set the clip's layer mode in compositions.
+        Using Blend Modes of Pillow images called ImagesChops ("Channel Operations").
+
+        Note: Only has effect when the clip is used in a CompositeVideoClip.
+        """
+        mode_without_option=["normal", "add_modulo", "darker", "difference", "lighter",
+        "logical_and", "logical_or", "logical_xor", "multiply", "soft_light", "hard_light",
+        "overlay", "screen",  "substract_modulo"]
+        mode_with_scale_offset=["add", "substract"]
+
+        if isinstance(mode, str):
+            if mode in mode_with_scale_offset:
+                self.mode_scale = scale
+                self.mode_offset = offset
+                if self.mask is not None:
+                    self.mask.mode_scale = scale
+                    self.mask.mode_offset = offset
+            else:
+                if mode not in mode_without_option:
+                    raise ValueError("Unknown mode in Pillow ImageChops")
+            self.mode = mode
+            if self.mask is not None:
+                self.mask.mode = mode
+        else:
+            raise ValueError("Select mode into available Pillow ImageChops :", mode_without_option+mode_with_scale_offset)
+        print("mode ", mode, " activated")
 
     # --------------------------------------------------------------
     # CONVERSIONS TO OTHER TYPES
@@ -1061,6 +1107,7 @@ class ImageClip(VideoClip):
 
     is_mask
       Set this parameter to `True` if the clip is a mask.
+      (only on the red layer ?)
 
     transparent
       Set this parameter to `True` (default) if you want the alpha layer
@@ -1078,6 +1125,7 @@ class ImageClip(VideoClip):
         self, img, is_mask=False, transparent=True, fromalpha=False, duration=None
     ):
         VideoClip.__init__(self, is_mask=is_mask, duration=duration)
+        #print("ImageClip with is_mask=", is_mask, ", transparent=", transparent, ", fromalpha=", fromalpha)
 
         if not isinstance(img, np.ndarray):
             # img is a string or path-like object, so read it in from disk
@@ -1286,6 +1334,7 @@ class TextClip(ImageClip):
         transparent=True,
         remove_temp=True,
         print_cmd=False,
+
     ):
         if text is not None:
             if temptxt is None:

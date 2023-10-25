@@ -87,6 +87,11 @@ class CompositeVideoClip(VideoClip):
         # order self.clips by layer
         self.clips = sorted(self.clips, key=lambda clip: clip.layer)
 
+        # set layer blend mode
+        for index, clip in enumerate(self.clips):
+            if not getattr(clip, "mode", None):
+                self.clips[index] = clip.with_mode("normal")
+
         # compute duration
         ends = [clip.end for clip in self.clips]
         if None not in ends:
@@ -114,6 +119,7 @@ class CompositeVideoClip(VideoClip):
                 maskclips, self.size, is_mask=True, bg_color=0.0
             )
 
+
     def make_frame(self, t):
         """The clips playing at time `t` are blitted over one another."""
         frame = self.bg.get_frame(t).astype("uint8")
@@ -122,7 +128,7 @@ class CompositeVideoClip(VideoClip):
         if self.bg.mask is not None:
             frame_mask = self.bg.mask.get_frame(t)
             im_mask = Image.fromarray(255 * frame_mask).convert("L")
-            im = im.putalpha(im_mask)
+            im.putalpha(im_mask)
 
         for clip in self.playing_clips(t):
             im = clip.blit_on(im, t)

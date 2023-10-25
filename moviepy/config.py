@@ -5,7 +5,7 @@ import subprocess as sp
 from pathlib import Path
 
 from moviepy.tools import cross_platform_popen_params
-
+os.environ['IMAGEMAGICK_BINARY'] = '/opt/local/bin/convert'
 
 if os.name == "nt":
     import winreg as wr
